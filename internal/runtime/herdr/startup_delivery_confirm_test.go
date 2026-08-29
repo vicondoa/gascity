@@ -285,8 +285,8 @@ func TestStartupDeliveryClearsStaleMarkerWithNoStartupText(t *testing.T) {
 
 // waitForIdleOutcome makes the startup readiness guard legible: the live city
 // measured 0 ok / 8 timeout / 2 error across 20h with every verdict discarded.
-// The interface-facing WaitForIdle keeps its proceed-either-way contract; the
-// outcome lets Start record WHY a strand happened.
+// The outcome lets Start and other callers distinguish WHY an idle wait
+// failed, rather than treating every non-idle verdict as success.
 func TestWaitForIdleOutcomeMapping(t *testing.T) {
 	p, state := newFakeHerdrProvider(t)
 
@@ -300,5 +300,15 @@ func TestWaitForIdleOutcomeMapping(t *testing.T) {
 	setState(t, state, "wait_times_out")
 	if got := p.waitForIdleOutcome(context.Background(), "gastown__witness", time.Second); got != idleWaitTimeout {
 		t.Fatalf("timed-out wait outcome = %q; want %q", got, idleWaitTimeout)
+	}
+}
+
+func TestWaitForIdleTimeoutIsNotSuccess(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
+	setState(t, state, "wait_times_out")
+
+	if err := p.WaitForIdle(context.Background(), "gastown__witness", time.Second); err == nil {
+		t.Fatal("WaitForIdle returned nil after herdr reported a timeout")
 	}
 }

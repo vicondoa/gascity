@@ -460,6 +460,23 @@ func TestListRunningIncludesUnregisteredBoundSessions(t *testing.T) {
 	}
 }
 
+func TestSessionNameForEventReversesMappedMixedCaseLongName(t *testing.T) {
+	p, _ := newFakeHerdrProvider(t)
+	const sessionName = "CIPcodes--gastown__witness-with-a-long-name"
+	bindTestPane(t, p, sessionName, bindModeAgent)
+	if err := p.SetMeta(sessionName, metaBoundName, sessionName); err != nil {
+		t.Fatalf("SetMeta(bound name): %v", err)
+	}
+
+	eventName := herdrAgentName(sessionName)
+	if got := p.SessionNameForEvent(eventName); got != sessionName {
+		t.Fatalf("SessionNameForEvent(%q) = %q, want %q", eventName, got, sessionName)
+	}
+	if got := p.SessionNameForEvent("foreign-agent"); got != "foreign-agent" {
+		t.Fatalf("unbound event name mapped to %q, want foreign-agent", got)
+	}
+}
+
 // A bound session whose pane is gone must not be listed (and is pruned).
 func TestListRunningSkipsGonePanes(t *testing.T) {
 	p, state := newFakeHerdrProvider(t)

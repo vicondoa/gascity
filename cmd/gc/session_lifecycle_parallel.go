@@ -431,6 +431,7 @@ func withReadyAssignedFlags(readyAssignedFlags []bool) startExecutionOption {
 type asyncStartTracker struct {
 	mu               sync.Mutex
 	wg               sync.WaitGroup
+	inFlight         int
 	stopping         bool
 	drainAckStopKeys sync.Map
 }
@@ -445,7 +446,27 @@ func (t *asyncStartTracker) start() (func(), bool) {
 		return nil, false
 	}
 	t.wg.Add(1)
-	return t.wg.Done, true
+	t.inFlight++
+	return func() {
+		t.mu.Lock()
+		if t.inFlight > 0 {
+			t.inFlight--
+		}
+		t.mu.Unlock()
+		t.wg.Done()
+	}, true
+}
+
+// hasInFlight reports whether an async start is still running. The event pump
+// uses this existing lifecycle tracker to defer a capped resync poke instead
+// of reconciling against a start wave that has not committed its result.
+func (t *asyncStartTracker) hasInFlight() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.inFlight > 0
 }
 
 func (t *asyncStartTracker) startDrainAckStop(key string) (func(), bool) {
@@ -1886,8 +1907,13 @@ func startPreparedStartCandidate(
 				// claim nudge once — the event-based symmetric counterpart to that
 				// cold-Start nudge. Best-effort; never fails the (successful) warm start.
 				if store != nil {
-					if raw, err := store.Get(item.candidate.info.ID); err == nil {
-						deliverWarmBindClaimNudge(ctx, sp, store, &raw, item.cfg.Nudge, warmClaim)
+					// Session beads are session-class: route the read and the
+					// marker write through the session coordination-class store so
+					// a [beads.classes.sessions] relocation reaches this path too.
+					// Identity to store at the default single-store backend.
+					sessStore := cliSessionStore(store, cfg, cityPath)
+					if raw, err := sessStore.Get(item.candidate.info.ID); err == nil {
+						deliverWarmBindClaimNudge(ctx, sp, sessStore, &raw, item.cfg.Nudge, warmClaim)
 					}
 				}
 				return false, nil

@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -27,10 +28,9 @@ var (
 )
 
 // idleWaitOutcome is the legible verdict of one `agent wait --until idle`
-// probe. The interface-facing WaitForIdle keeps its proceed-either-way
-// contract, but internal callers (Start's startup delivery) need to see WHY a
-// wait did not confirm: the live city measured 0 ok / 8 timeout / 2 error
-// over 20h with every verdict silently discarded (gas-90h).
+// probe. Internal callers need to see WHY a wait did not confirm: the live city
+// measured 0 ok / 8 timeout / 2 error over 20h with every verdict silently
+// discarded (gas-90h).
 type idleWaitOutcome string
 
 const (
@@ -63,13 +63,24 @@ func (p *Provider) waitForIdleOutcome(ctx context.Context, name string, timeout 
 }
 
 // WaitForIdle blocks until herdr reports the agent idle or the timeout
-// elapses. Either outcome (idle reached or timed out) means the caller may
-// proceed — as does an unregistered session (raw shell panes have no agent to
-// wait on) — so only context cancellation surfaces as an error; the timeout
-// is a hard bound.
+// elapses. A nil result is a positive idle confirmation; timeout, no-agent, and
+// transport outcomes are errors so callers never inject after an unconfirmed
+// wait.
 func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
-	_ = p.waitForIdleOutcome(ctx, name, timeout)
-	return ctx.Err()
+	outcome := p.waitForIdleOutcome(ctx, name, timeout)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	switch outcome {
+	case idleWaitReached:
+		return nil
+	case idleWaitNoAgent:
+		return runtime.ErrSessionNotFound
+	case idleWaitTimeout:
+		return fmt.Errorf("herdr agent %q did not become idle before timeout", name)
+	default:
+		return fmt.Errorf("herdr agent %q idle confirmation failed", name)
+	}
 }
 
 // NudgeNow injects input immediately. herdr's send/run already deliver without a

@@ -2640,10 +2640,16 @@ func TestAsyncStartTrackerWaitZeroDoesNotBlock(t *testing.T) {
 	if !ok {
 		t.Fatal("tracker should accept work before shutdown")
 	}
+	if !tracker.hasInFlight() {
+		t.Fatal("tracker should report the async start in flight")
+	}
 	if tracker.wait(0) {
 		t.Fatal("zero-timeout wait should not report completion while async work is still running")
 	}
 	done()
+	if tracker.hasInFlight() {
+		t.Fatal("tracker should report no async starts after completion")
+	}
 	if !tracker.wait(time.Second) {
 		t.Fatal("tracker should report completion after async work finishes")
 	}

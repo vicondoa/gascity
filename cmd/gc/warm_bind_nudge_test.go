@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -27,11 +28,21 @@ func warmBindPoolSession() *beads.Bead {
 func alwaysUnclaimed(beads.Bead) bool { return true }
 func neverUnclaimed(beads.Bead) bool  { return false }
 
+type warmBindNudgeFailureProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *warmBindNudgeFailureProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	_ = p.Fake.Nudge(name, content)
+	return p.err
+}
+
 // countNudges returns how many Nudge calls the fake recorded and the message of
 // the last one.
-func countNudges(sp *runtime.Fake) (int, string) {
+func countNudges(sp interface{ SnapshotCalls() []runtime.Call }) (int, string) {
 	n, last := 0, ""
-	for _, c := range sp.Calls {
+	for _, c := range sp.SnapshotCalls() {
 		if c.Method == "Nudge" {
 			n++
 			last = c.Message
@@ -45,6 +56,7 @@ func countNudges(sp *runtime.Fake) (int, string) {
 // (marker guard); binding a different trigger fires exactly one more nudge.
 func TestDeliverWarmBindClaimNudge_FiresOncePerBinding(t *testing.T) {
 	sp := runtime.NewFake()
+	sp.WaitForIdleErrors["worker-1"] = nil
 	// tmux-like default: activity reporting ON. The hook must still fire — proving
 	// it is provider-agnostic, not gated on CanReportActivity.
 	if !sp.Capabilities().CanReportActivity {
@@ -86,6 +98,7 @@ func TestDeliverWarmBindClaimNudge_FiresOncePerBinding(t *testing.T) {
 // The idle-ready gate runs before delivery so the nudge never lands mid-turn.
 func TestDeliverWarmBindClaimNudge_WaitsForIdleBeforeDelivering(t *testing.T) {
 	sp := runtime.NewFake()
+	sp.WaitForIdleErrors["worker-1"] = nil
 	session := warmBindPoolSession()
 	store := beads.NewMemStoreFrom(0, []beads.Bead{*session}, nil)
 
@@ -107,6 +120,53 @@ func TestDeliverWarmBindClaimNudge_WaitsForIdleBeforeDelivering(t *testing.T) {
 	}
 	if !sawWait || !sawNudge {
 		t.Fatalf("want both WaitForIdle and Nudge; got wait=%v nudge=%v", sawWait, sawNudge)
+	}
+}
+
+func TestDeliverWarmBindClaimNudge_SkipsWhenIdleIsNotConfirmed(t *testing.T) {
+	for name, idleErr := range map[string]error{
+		"blocked": errors.New("agent still working"),
+		"timeout": context.DeadlineExceeded,
+	} {
+		t.Run(name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			sp.WaitForIdleErrors["worker-1"] = idleErr
+			session := warmBindPoolSession()
+			store := beads.NewMemStoreFrom(0, []beads.Bead{*session}, nil)
+
+			deliverWarmBindClaimNudge(context.Background(), sp, store, session, warmClaimText, alwaysUnclaimed)
+
+			if n, _ := countNudges(sp); n != 0 {
+				t.Fatalf("got %d Nudge calls after idle confirmation error, want 0", n)
+			}
+			if got := session.Metadata[beadmeta.NudgedForTriggerMetadataKey]; got != "" {
+				t.Fatalf("marker = %q after idle confirmation error, want empty", got)
+			}
+		})
+	}
+}
+
+func TestDeliverWarmBindClaimNudge_UpgradesLegacyMarker(t *testing.T) {
+	sp := runtime.NewFake()
+	sp.WaitForIdleErrors["worker-1"] = nil
+	session := warmBindPoolSession()
+	session.Metadata["warm_bind_nudged_for_trigger"] = "w-1"
+	store := beads.NewMemStoreFrom(0, []beads.Bead{*session}, nil)
+
+	deliverWarmBindClaimNudge(context.Background(), sp, store, session, warmClaimText, alwaysUnclaimed)
+
+	if n, _ := countNudges(sp); n != 0 {
+		t.Fatalf("legacy marker upgrade delivered %d Nudge calls, want 0", n)
+	}
+	if got := session.Metadata[beadmeta.NudgedForTriggerMetadataKey]; got != "w-1" {
+		t.Fatalf("in-memory new marker = %q, want w-1", got)
+	}
+	stored, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	if got := stored.Metadata[beadmeta.NudgedForTriggerMetadataKey]; got != "w-1" {
+		t.Fatalf("persisted new marker = %q, want w-1", got)
 	}
 }
 
@@ -170,7 +230,8 @@ func TestDeliverWarmBindClaimNudge_NoopGuards(t *testing.T) {
 // A delivery that fails leaves the marker unset so a later tick retries; the
 // unclaimed gate keeps that retry safe.
 func TestDeliverWarmBindClaimNudge_NoMarkerOnDeliveryFailure(t *testing.T) {
-	sp := runtime.NewFailFake() // every provider op errors, incl. Nudge
+	sp := &warmBindNudgeFailureProvider{Fake: runtime.NewFake(), err: errors.New("nudge failed")}
+	sp.WaitForIdleErrors["worker-1"] = nil
 	session := warmBindPoolSession()
 	store := beads.NewMemStoreFrom(0, []beads.Bead{*session}, nil)
 

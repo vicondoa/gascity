@@ -1128,7 +1128,7 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 	// The observe is a session-class read; route through the session store
 	// (identity today). The enqueue above stays on its own nudge store.
 	if obs, err := workerObserveNudgeTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp); err == nil && obs.Running {
-		maybeStartNudgePoller(target)
+		maybeStartNudgePoller(target, sp)
 	}
 	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, undelivered, stdout, stderr)
 }
@@ -1242,7 +1242,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		return err
 	}
 	if obs.Running {
-		maybeStartNudgePoller(target)
+		maybeStartNudgePoller(target, sp)
 	}
 	return nil
 }
@@ -1460,6 +1460,40 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	if len(items) == 0 {
 		return false, bookkeepErr
 	}
+	// Re-read the authoritative session state after claiming. The pre-claim
+	// idle observation is only a hint: a Herdr agent can become working or
+	// blocked in the claim window. Release the claim on any non-idle outcome so
+	// the canonical queue lease path retries it later instead of injecting into
+	// the wrong turn.
+	postClaimObs, observeErr := workerObserveNudgeTarget(target, handleSessStore, sp)
+	if observeErr != nil {
+		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
+		if runtime.IsSessionGone(observeErr) || errors.Is(observeErr, session.ErrSessionNotFound) {
+			return false, errors.Join(bookkeepErr, relErr)
+		}
+		return false, errors.Join(bookkeepErr, observeErr, relErr)
+	}
+	if !queuedNudgeIdleConfirmedAfterClaim(target, sp, quiescence, postClaimObs) {
+		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
+		return false, errors.Join(bookkeepErr, relErr)
+	}
+	// WaitForIdle closes the blocked-prompt window, but the session can still
+	// be replaced before the nudge handle is built. Re-observe the live
+	// incarnation after that wait and refuse to inject if the generation fence
+	// no longer matches the claimed item.
+	postIdleObs, observeErr := workerObserveNudgeTarget(target, handleSessStore, sp)
+	if observeErr != nil {
+		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
+		if runtime.IsSessionGone(observeErr) || errors.Is(observeErr, session.ErrSessionNotFound) {
+			return false, errors.Join(bookkeepErr, relErr)
+		}
+		return false, errors.Join(bookkeepErr, observeErr, relErr)
+	}
+	matches, matchErr := nudgeTargetLiveGenerationMatches(target, postIdleObs, sp)
+	if matchErr != nil || !matches || !postIdleObs.Running {
+		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
+		return false, errors.Join(bookkeepErr, matchErr, relErr)
+	}
 	var msg string
 	if target.sessionTransport() == "acp" {
 		msg = formatNudgeRuntimeMessage(items)
@@ -1500,6 +1534,30 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
 	stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
 	return true, errors.Join(bookkeepErr, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)))
+}
+
+// queuedNudgeIdleConfirmedAfterClaim reuses the existing poller idle gate for
+// ordinary providers, but asks event-capable providers for a fresh positive
+// idle verdict after the queue claim. Herdr's activity stamp is intentionally
+// asynchronous, so a stale "idle" stamp alone cannot close this TOCTOU window.
+func queuedNudgeIdleConfirmedAfterClaim(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
+	if !obs.Running {
+		return false
+	}
+	if providerRetiresNudgePollers(sp) {
+		waiter, ok := sp.(runtime.IdleWaitProvider)
+		if !ok || target.sessionName == "" {
+			return false
+		}
+		timeout := quiescence
+		if timeout <= 0 {
+			timeout = defaultNudgePollQuiescence
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		return waiter.WaitForIdle(ctx, target.sessionName, timeout) == nil
+	}
+	return pollerSessionIdleEnough(target, sp, quiescence, obs)
 }
 
 func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t time.Time) {
@@ -1549,8 +1607,16 @@ func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provid
 	return sleeper.SleepCapability(target.sessionName) == runtime.SessionSleepCapabilityTimedOnly
 }
 
-func maybeStartNudgePoller(target nudgeTarget) {
+func maybeStartNudgePoller(target nudgeTarget, sp runtime.Provider) {
 	if target.sessionName == "" {
+		return
+	}
+	// Event-capable providers retire the sidecar class entirely: the
+	// supervisor-hosted nudge event dispatcher owns queued delivery for them
+	// in BOTH nudge_dispatcher modes, and a spawned poller would only race
+	// it. Callers without a resolved provider pass nil and keep today's
+	// spawn behavior.
+	if providerRetiresNudgePollers(sp) {
 		return
 	}
 	// Reap stale poller PID files before deciding whether to spawn. Owning

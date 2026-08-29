@@ -69,10 +69,13 @@ var (
 )
 
 // Agent-status values the tracker interprets (herdr 0.7.3 enum: idle,
-// working, blocked, done, unknown). Everything that is not working stamps at
-// its observed transition and ages from there.
+// working, blocked, done, unknown). Working and blocked are continuously
+// active: blocked means the agent is waiting on an interaction, not that its
+// input prompt is idle. Everything else stamps at its observed transition and
+// ages from there.
 const (
 	agentStatusWorking = "working"
+	agentStatusBlocked = "blocked"
 	agentStatusUnknown = "unknown"
 )
 
@@ -165,8 +168,8 @@ func (a *activityTracker) stop() {
 }
 
 // lastActivity answers GetLastActivity from tracked state: unknown session →
-// zero; working → now (continuously active); anything else → the frozen
-// stamp of its last observed change.
+// zero; working or blocked → now (continuously active); anything else → the
+// frozen stamp of its last observed change.
 func (a *activityTracker) lastActivity(name string) time.Time {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -174,7 +177,7 @@ func (a *activityTracker) lastActivity(name string) time.Time {
 	if !ok {
 		return time.Time{}
 	}
-	if e.status == agentStatusWorking {
+	if e.status == agentStatusWorking || e.status == agentStatusBlocked {
 		return a.now()
 	}
 	return e.stamp

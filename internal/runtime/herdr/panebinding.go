@@ -193,6 +193,22 @@ func (p *Provider) boundSessionNames() []string {
 	return names
 }
 
+// SessionNameForEvent reverses Herdr's registry name mapping for a session
+// event. The event stream carries herdrAgentName values, while Gas City
+// targeting uses the exact bound name persisted in metaBoundName.
+func (p *Provider) SessionNameForEvent(eventName string) string {
+	eventName = strings.TrimSpace(eventName)
+	if eventName == "" {
+		return ""
+	}
+	for _, sessionName := range p.boundSessionNames() {
+		if herdrAgentName(sessionName) == eventName {
+			return sessionName
+		}
+	}
+	return eventName
+}
+
 // readMetaFile reads one sidecar value ("" when absent).
 func readMetaFile(path string) (string, error) {
 	b, err := os.ReadFile(path)
