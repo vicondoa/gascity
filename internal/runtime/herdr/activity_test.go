@@ -118,6 +118,22 @@ func TestActivityWorkingIsContinuouslyActive(t *testing.T) {
 	}
 }
 
+func TestActivityBlockedIsContinuouslyActive(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	f.setAgents(agentInfo{Name: "b", PaneID: "%1", AgentStatus: "blocked", Revision: 1})
+	p := activityTestProvider(t, sock)
+
+	first := lastActivity(t, p, "b")
+	time.Sleep(20 * time.Millisecond)
+	second := lastActivity(t, p, "b")
+	if !second.After(first) {
+		t.Fatalf("blocked session must read as continuously active: second %v not after first %v", second, first)
+	}
+	if age := time.Since(second); age > time.Second {
+		t.Fatalf("blocked session activity age %v; want ~now", age)
+	}
+}
+
 // When a session leaves working, the stamp freezes at the observed transition
 // and ages from there — that frozen stamp is what quiescence and idle-timeout
 // checks measure against.

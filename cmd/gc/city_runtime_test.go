@@ -4201,6 +4201,37 @@ func TestCityRuntimeTickSkipsOnDeathWhenSessionListingIsPartial(t *testing.T) {
 	}
 }
 
+func TestLateDirtySessionPhasesIncludePoolDeathReconciliation(t *testing.T) {
+	cityPath := t.TempDir()
+	outFile := filepath.Join(cityPath, "late-dirty-pool-death.txt")
+	sessionName := "worker-1"
+	prevPoolRunning := map[string]bool{sessionName: true}
+	var stderr bytes.Buffer
+	cr := &CityRuntime{
+		cityPath: cityPath,
+		cfg:      &config.City{},
+		sp:       runtime.NewFake(),
+		poolDeathHandlers: map[string]poolDeathInfo{
+			sessionName: {
+				Command: "printf fired > " + shellQuotePath(outFile),
+				Dir:     cityPath,
+			},
+		},
+		stderr: &stderr,
+	}
+
+	if !cr.enableLateDirtySessionPhases(false, true, time.Now(), &prevPoolRunning) {
+		t.Fatal("late dirty did not enable session phases")
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("late-dirty pool death hook did not run: %v; stderr=%s", err, stderr.String())
+	}
+	if got := strings.TrimSpace(string(data)); got != "fired" {
+		t.Fatalf("pool death hook output = %q, want fired", got)
+	}
+}
+
 func TestControlDispatcherOnlyConfig_IncludesRigScopedDispatchers(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{

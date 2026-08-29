@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +30,7 @@ const (
 	codexDeferredDialogDelay  = 2 * time.Second
 	softInterruptFallbackWait = 2 * time.Second
 	startupDialogVerifiedKey  = "startup_dialog_verified"
+	deferredSubmitWakeTimeout = 200 * time.Millisecond
 )
 
 // SubmitIntent is the semantic delivery choice for a user message.
@@ -585,10 +587,32 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 	}); err != nil {
 		return fmt.Errorf("queueing deferred submit: %w", err)
 	}
+	// Providers with a push session-event stream retire the sidecar poller
+	// class: the supervisor's nudge event dispatcher delivers queued items
+	// (deferred submits included) on idle events and dispatch passes, and a
+	// spawned poller would only race it. Wake the dispatcher directly so an
+	// already-idle session does not wait for its next event or patrol tick.
 	if m.supportsFollowUpLocked(b) {
-		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName)
+		if _, eventCapable := m.sp.(runtime.SessionEventProvider); eventCapable {
+			pingDeferredSubmitWakeSocket(m.cityPath)
+		} else {
+			_ = startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName)
+		}
 	}
 	return nil
+}
+
+var pingDeferredSubmitWakeSocket = func(cityPath string) {
+	if strings.TrimSpace(cityPath) == "" {
+		return
+	}
+	conn, err := net.DialTimeout("unix", nudgequeue.WakeSocketPath(cityPath), deferredSubmitWakeTimeout)
+	if err != nil {
+		return
+	}
+	defer conn.Close() //nolint:errcheck // best-effort signaling
+	_ = conn.SetWriteDeadline(time.Now().Add(deferredSubmitWakeTimeout))
+	_, _ = conn.Write([]byte{1})
 }
 
 // deferredSubmitEpoch returns the continuation epoch a deferred submit is

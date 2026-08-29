@@ -916,11 +916,14 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 
 // GetLastActivity reports the session's last observed activity, maintained by
 // the lazily started activity tracker (activity.go): now while the agent's
-// status sits at working, the frozen stamp of its last observed change
-// otherwise, and the zero time for sessions the tracker has not observed. The
-// error is always nil — a tracker that cannot reach the server keeps its last
-// known state, and never-observed sessions read as unknown (zero), which every
-// consumer already treats as "no signal".
+// status sits at working or blocked, the frozen stamp of its last observed
+// change otherwise, and the zero time for sessions the tracker has not
+// observed. Blocked is continuously non-idle because it represents an agent
+// waiting on an interaction; queued delivery must wait for the authoritative
+// idle transition before injecting input. The error is always nil — a tracker
+// that cannot reach the server keeps its last known state, and never-observed
+// sessions read as unknown (zero), which every consumer already treats as
+// "no signal".
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	p.act.start(p, name)
 	return p.act.lastActivity(name), nil
